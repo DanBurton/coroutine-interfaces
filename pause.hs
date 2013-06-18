@@ -14,7 +14,7 @@ example1 = Run $ do
       putStrLn "Step 3"
       return Done
 
-fullRun :: Pause IO -> IO ()
+fullRun :: Monad m => Pause m -> m ()
 fullRun Done = return ()
 fullRun (Run m) = m >>= fullRun
 
@@ -23,7 +23,7 @@ fullRun (Run m) = m >>= fullRun
 -- Step 2
 -- Step 3
 
-runN :: Int -> Pause IO -> IO (Pause IO)
+runN :: Monad m => Int -> Pause m -> m (Pause m)
 runN 0 p = return p
 runN _ Done = return Done
 runN n (Run m)
