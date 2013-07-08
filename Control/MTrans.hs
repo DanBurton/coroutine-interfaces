@@ -31,13 +31,13 @@ class (Functor t) => Monad t where
 class Copointed t where
   extract :: P.Monad m => t m a -> m a
 
-class (Functor t) => Comonad t where
+class (Functor t, Copointed t) => Comonad t where
   extend :: (P.Monad m, P.Monad m') =>
     (forall x. t m x -> m' x) -> t m a -> t m' a
-  extend f m = lift (f m)
-  -- default extend :: (P.Monad m, P.Monad m', P.Monad (t m)) =>
-  --   (forall x. t m x -> m' x) -> t m a -> t m' a
-  -- extend f m = map f (duplicate m)
+  -- extend f m = lift (f m)
+  default extend :: (P.Monad m, P.Monad m', P.Monad (t m)) =>
+    (forall x. t m x -> m' x) -> t m a -> t m' a
+  extend f m = map f (duplicate m)
 
   duplicate :: (P.Monad m) => t m a -> t (t m) a
   default duplicate :: (P.Monad m, P.Monad (t m)) => t m a -> t (t m) a

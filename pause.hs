@@ -43,6 +43,10 @@ data PauseT m r
   = RunT (m (PauseT m r))
   | DoneT r
 
+instance (Show r) => Show (PauseT m r) where
+  show (RunT _) = "Run{ ... }"
+  show (DoneT r) = "Done{ " ++ show r ++ " }"
+
 instance (Monad m) => Monad (PauseT m) where
   return a = DoneT a
   DoneT r >>= f = f r
@@ -65,6 +69,13 @@ example2 = do
 fullRunT :: PauseT IO r -> IO r
 fullRunT (DoneT r) = return r
 fullRunT (RunT m) = m >>= fullRunT
+
+example3 :: PauseT IO ()
+example3 = do
+  _ <- return "hello"
+  _ <- return "world"
+  _ <- return "beep"
+  return ()
 
 runNT :: Int -> PauseT IO r -> IO (PauseT IO r)
 runNT 0 p = return p

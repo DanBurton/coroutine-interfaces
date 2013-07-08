@@ -27,3 +27,5 @@ insert6 = MT.map insert5
 insert7 = MT.map insert6
 insert8 = MT.map insert7
 insert9 = MT.map insert8
+
+foreverK f = let go a = f a >>= go in go

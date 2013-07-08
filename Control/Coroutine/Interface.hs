@@ -1,8 +1,14 @@
+-- {-# LANGUAGE ScopedTypeVariables, InstanceSigs, KindSignatures #-}
+
 module Control.Coroutine.Interface (
     Producing(..),
     Consuming(..),
     ProducerState(..),
     yield,
+    overC,
+    replaceYield,
+    pfold,
+    push,
     ($$),
     (+$+)
   ) where
@@ -15,6 +21,7 @@ import Control.Monad
 import Control.Monad.Trans.Class (MonadTrans, lift)
 import Data.Function (fix)
 import Data.Monoid
+import Control.Util
 
 import qualified Control.IxM as IxM
 import qualified Control.MTrans as MT
@@ -34,8 +41,37 @@ type Resumable o i m r
 
 ----------------------------------------------------------------
 
+
 yield :: Monad m => o -> Producing o i m i
 yield o = Producing $ return $ Produced o $ Consuming return
+
+push :: Monad m => Producing o i m r -> Consuming r m i o
+push p = Consuming $ \i -> Producing $ resume p >>= \s -> case s of
+  Done r -> return (Done r)
+  Produced o k -> return (Produced o (push (provide k i)))
+
+push' :: Monad m => Producing o i m r -> Consuming (i, r) m i o
+push' p = Consuming $ \i -> Producing $ resume p >>= \s -> case s of
+  Done r -> return (Done (i, r))
+  Produced o k -> return (Produced o (push' (provide k i)))
+
+overC :: (Producing o i m r -> Producing o' i m' r') -> Consuming r m i o -> Consuming r' m' i o'
+overC f k = Consuming (f . provide k)
+
+
+pfold :: (Monad m') => (m (ProducerState o i m r) -> m' (ProducerState o i m r)) ->
+  (r -> m' r') -> (o -> m' i) -> Producing o i m r -> m' r'
+pfold morph return' yield' p0 = go p0 where
+  go p = morph (resume p) >>= \s -> case s of
+    Done r -> return' r
+    Produced o k -> yield' o >>= go . provide k
+
+-- pfold lift return yield === id
+
+
+replaceYield :: (Monad m) => (o -> Producing o' i' m i) -> Producing o i m r -> Producing o' i' m r
+replaceYield = pfold lift return
+
 
 
 infixl 0 $$
@@ -56,6 +92,13 @@ rewrap :: (MonadTrans t, Monad m) =>
   Consuming r m i o -> i -> t m (ProducerState o i m r)
 rewrap p a = lift (resume (provide p a))
 
+commute :: (Monad m) => Producing a b (Producing c d m) r -> Producing c d (Producing a b m) r
+commute p = p' $$ idP where
+  p' = insert2 p
+  idP = insert1 `overC` idProxy
+  idProxy = Consuming $ fix ((lift . yield >=> yield) >=>)
+
+
 ----------------------------------------------------------------
 
 instance (Monad m) => Functor (Producing o i m) where
@@ -66,11 +109,12 @@ instance (Monad m) => Applicative (Producing o i m) where
    (<*>) = ap
 
 instance (Monad m) => Monad (Producing o i m) where
-   return x = Producing $ return (Done x)
+   return x = lift (return x)
    p >>= f = Producing $ resume p >>= \s -> case s of
-     Done x -> resume (f x)
-     Produced o k ->
-      return $ Produced o $ Consuming (provide k >=> f)
+     Done r -> resume (f r)
+     Produced o k -> return $ Produced o $ Consuming (provide k >=> f)
+   -- if not for the circular definition...
+   -- pfold lift f yield p
 
 instance MonadTrans (Producing o i) where
   lift m = Producing (liftM Done m)
@@ -78,11 +122,8 @@ instance MonadTrans (Producing o i) where
 ---------------------------------------------------------------
 
 instance (Monad m) => Functor (Consuming r m a) where
-  fmap f = go where
-    go k = Consuming $ rewrap k >=> \s -> case s of
-      Done r -> return r
-      Produced a k' ->
-        yield (f a) >>= provide (go k')
+  fmap f = overC $ replaceYield (yield . f)
+
 
 instance (Monad m) => Applicative (Consuming r m a) where
   pure a = arr (const a)
@@ -92,6 +133,18 @@ instance (Monad m) => Applicative (Consuming r m a) where
       Done r -> return r
       Produced x kx' ->
         yield (f x) >>= provide (kf' <*> kx')
+
+arrowFmap :: (Arrow a) => (y -> z) -> a x y -> a x z
+arrowFmap f a = arr f . a
+
+arrowPure :: (Arrow a) => z -> a x z
+arrowPure z = arr (const z)
+
+arrowAp :: (Arrow a) => a b (x -> y) -> a b x -> a b y
+arrowAp af ax = arrowFmap (uncurry ($)) (af &&& ax)
+
+zipC :: Monad m => Consuming r m a b -> Consuming r m a' b' -> Consuming r m (a,a') (b,b')
+zipC = (***)
 
 instance (Monad m) => Category (Consuming r m) where
   id = Consuming $ fix (yield >=>)
@@ -123,7 +176,7 @@ instance (Monad m) => ArrowChoice (Consuming r m) where
       Left b -> rewrap k b >>= \s -> case s of
         Done r -> return r
         Produced c k' -> yield (Left c) >>= provide (left k')
-  -- left = leftApp
+  -- left = leftApp ???
 
 instance (Monad m) => ArrowApply (Consuming r m) where
   app = Consuming go where
@@ -135,18 +188,30 @@ instance (Monad m) => ArrowApply (Consuming r m) where
 ---------------------------------------------------------------
 
 instance IxM.Functor Producing where
-  map f = go where
-    go p = Producing $ f $ liftM map' (resume p)
-    map' (Done r) = Done r
-    map' (Produced o k) = Produced o $ Consuming (go . provide k)
+  map f = pfold (lift . f) return yield
+
+    --go p = Producing $ f $ liftM map' (resume p)
+    --map' (Done r) = Done r
+    --map' (Produced o k) = Produced o $ Consuming (go . provide k)
 
 instance IxM.Pointed Producing where
   return = lift
 
+-- Producing is not an IxM.Monad. Consider join:
+-- join :: Producing i j (Producing j k) m r -> Producing i k m r
+-- This presumes to hook up the inner Producing's j outputs
+-- with the outer Producing's j inputs.
+
+-- This won't work when the two interfaces are not suspended upon
+-- the same number of times.
+
+
 instance IxM.Copointed Producing where
-  extract p = resume p >>= \s -> case s of
-    Done r -> return r
-    Produced o k -> IxM.extract (provide k o)
+  extract = pfold id return return
+
+  --resume p >>= \s -> case s of
+  --  Done r -> return r
+  --  Produced o k -> IxM.extract (provide k o)
 
 instance IxM.Comonad Producing where
   extend morph = go where
@@ -163,8 +228,9 @@ instance MT.Functor (Producing o i) where
   map = IxM.map
 
 instance MT.Monad (Producing o i) where
-  join p = resume p >>= \s -> case s of
-    Done r -> return r
-    Produced o k -> yield o >>= MT.join . provide k
+  join = pfold id return yield 
 
-instance MT.Comonad (Producing o i)
+  --resume p >>= \s -> case s of
+  --  Done r -> return r
+  --  Produced o k -> yield o >>= MT.join . provide k
+
